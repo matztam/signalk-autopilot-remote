@@ -10,30 +10,41 @@ buzzer = null;
 buzzerState = 0;
 
 
-INPUT_ADJUST_HEADING_PLUS_1 = 1;
-INPUT_ADJUST_HEADING_PLUS_10 = 2;
-INPUT_ADJUST_HEADING_MINUS_1 = 4;
-INPUT_ADJUST_HEADING_MINUS_10 = 8;
-INPUT_TACK_STARBOARD = 3;
-INPUT_TACK_PORT = 12;
-INPUT_STATE_AUTO = 5;
-INPUT_STATE_WIND = 6;
-INPUT_STATE_STANDBY = 9;
-INPUT_STATE_ROUTE = 10;
-INPUT_KEYLOCK = 14;
+INPUT_ADJUST_HEADING_PLUS_1 = 8;  //1000
+INPUT_ADJUST_HEADING_PLUS_10 = 4; //0100
+INPUT_ADJUST_HEADING_MINUS_1 = 2; //0010
+INPUT_ADJUST_HEADING_MINUS_10 = 1;//0001
+INPUT_ADJUST_HEADING_AGAINST_WIND = 7; //0111
+INPUT_TACK_STARBOARD = 12;        //1100
+INPUT_TACK_PORT = 3;              //0011
+INPUT_STATE_AUTO = 10;            //1010
+INPUT_STATE_WIND = 6;             //0110
+INPUT_STATE_STANDBY = 9;          //1011
+INPUT_STATE_ROUTE = 5;            //0101
+INPUT_KEYLOCK = 14;               //1110
 
 
-const commands = {
-  1: { "path": "steering.autopilot.actions.adjustHeading", "value": 1 },
-  2: { "path": "steering.autopilot.actions.adjustHeading", "value": 10 },
-  4: { "path": "steering.autopilot.actions.adjustHeading", "value": -1 },
-  8: { "path": "steering.autopilot.actions.adjustHeading", "value": -10 },
-  3: { "path": "steering.autopilot.actions.tack", "value": "starboard" },
-  12: { "path": "steering.autopilot.actions.tack", "value": "port" },
-  5: { "path": "steering.autopilot.state", "value": "auto" },
-  6: { "path": "steering.autopilot.state", "value": "wind" },
-  9: { "path": "steering.autopilot.state", "value": "standby" },
-  10: { "path": "steering.autopilot.state", "value": "route" },
+const COMMANDS = {
+  [INPUT_ADJUST_HEADING_PLUS_1]: { "path": "steering.autopilot.actions.adjustHeading", "value": 1 },
+  [INPUT_ADJUST_HEADING_PLUS_10]: { "path": "steering.autopilot.actions.adjustHeading", "value": 10 },
+  [INPUT_ADJUST_HEADING_MINUS_1]: { "path": "steering.autopilot.actions.adjustHeading", "value": -1 },
+  [INPUT_ADJUST_HEADING_MINUS_10]: { "path": "steering.autopilot.actions.adjustHeading", "value": -10 },
+  [INPUT_ADJUST_HEADING_AGAINST_WIND]: { "path": "steering.autopilot.target.windAngleApparent", "value": 0 },
+  [INPUT_TACK_STARBOARD]: { "path": "steering.autopilot.actions.tack", "value": "starboard" },
+  [INPUT_TACK_PORT]: { "path": "steering.autopilot.actions.tack", "value": "port" },
+  [INPUT_STATE_AUTO]: { "path": "steering.autopilot.state", "value": "auto" },
+  [INPUT_STATE_WIND]: { "path": "steering.autopilot.state", "value": "wind" },
+  [INPUT_STATE_STANDBY]: { "path": "steering.autopilot.state", "value": "standby" },
+  [INPUT_STATE_ROUTE]: { "path": "steering.autopilot.state", "value": "route" },
+};
+
+const BEEP_PATTERNS = {
+  SINGLE_BUTTON: [100],
+  KEYLOCK_ENABLE: [150, 50, 150, 50, 150],
+  KEYLOCK_DISABLE: [150, 50, 150],
+  TACK: [1000],
+  HEADING_AGAINST_WIND: [1000, 200, 1000],
+  STARTUP: [50],
 };
 
 
@@ -41,6 +52,7 @@ keyLock = false;
 keyLockTimeout = null;
 tackTimeout = null;
 beepTimeout = null;
+againstWindTimeout = null;
 
 
 module.exports = function (app) {
@@ -52,8 +64,8 @@ module.exports = function (app) {
 
   plugin.start = function (options, restartPlugin) {
     app.debug('Plugin started');
-    
-    if(!Object.keys(options).length === 0){
+
+    if (!Object.keys(options).length === 0) {
       console.log("Please configure plugin")
       return;
     }
@@ -64,12 +76,14 @@ module.exports = function (app) {
     data2 = new Gpio(options.data2Gpio, 'in', 'none');
     data3 = new Gpio(options.data3Gpio, 'in', 'none');
     data4 = new Gpio(options.data4Gpio, 'in', 'none');
-    
+
     buzzer = new Gpio(options.buzzerGpio, 'out');
 
-    receiveSignal = new Gpio(options.receiveSignalGpio, 'in', 'rising', { debounceTimeout: 50 });
+    receiveSignal = new Gpio(options.receiveSignalGpio, 'in', 'rising', { debounceTimeout: 30 });
 
     receiveSignal.watch(plugin.inputCallback);
+
+    //setTimeout(plugin.beep(BEEP_PATTERNS.STARTUP), 3000);
   };
 
   plugin.stop = function () {
@@ -81,7 +95,7 @@ module.exports = function (app) {
     data4.unexport();
   };
 
-  
+
   plugin.schema = {
     type: 'object',
     required: ['data1Gpio', 'data2Gpio', 'data3Gpio', 'data4Gpio', 'receiveSignalGpio'],
@@ -104,7 +118,7 @@ module.exports = function (app) {
       data3Gpio: {
         type: 'number',
         title: 'Data input 3 gpio pin',
-        default: 25,
+        default: 16,
       },
       data4Gpio: {
         type: 'number',
@@ -114,7 +128,7 @@ module.exports = function (app) {
       receiveSignalGpio: {
         type: 'number',
         title: 'Receive signal gpio pin',
-        default: 4,
+        default: 26,
       },
       buzzerGpio: {
         type: 'number',
@@ -142,16 +156,21 @@ module.exports = function (app) {
 
     if (keyLock) {
       console.log("Key lock is enabled");
-      plugin.beep([500, 300, 500, 300, 500]);
+      plugin.beep(BEEP_PATTERNS.KEYLOCK_ENABLE);
       return;
     }
 
     if (input == INPUT_TACK_PORT || input == INPUT_TACK_STARBOARD) {
-      tackTimeout = setTimeout(plugin.tackCallback, 1000);
+      tackTimeout = setTimeout(plugin.tackCallback, 2000);
       return;
     }
+    
+    if(input == INPUT_ADJUST_HEADING_AGAINST_WIND){
+		againstWindTimeout = setTimeout(plugin.adjustHeadingAgainstWindCallback, 2000);
+		return;
+	}
 
-    plugin.beep([300]);
+    plugin.beep(BEEP_PATTERNS.SINGLE_BUTTON);
 
     plugin.execCommand(input);
   }
@@ -163,10 +182,10 @@ module.exports = function (app) {
       keyLock ^= true;;
     }
 
-    if(keyLock){
-      plugin.beep([500, 300, 500, 300, 500]);
-    }else{
-      plugin.beep([500, 300, 500]);
+    if (keyLock) {
+      plugin.beep(BEEP_PATTERNS.KEYLOCK_ENABLE);
+    } else {
+      plugin.beep(BEEP_PATTERNS.KEYLOCK_DISABLE);
     }
   }
 
@@ -175,22 +194,32 @@ module.exports = function (app) {
 
     if (input == INPUT_TACK_PORT || input == INPUT_TACK_STARBOARD) {
       plugin.execCommand(input);
-      plugin.beep([1000]);
+      plugin.beep(BEEP_PATTERNS.TACK);
     }
+  }
+  
+  plugin.adjustHeadingAgainstWindCallback = function(){
+    let input = plugin.readInputs();
+    
+    if (input == INPUT_ADJUST_HEADING_AGAINST_WIND) {
+      plugin.execCommand(input);
+      plugin.beep(BEEP_PATTERNS.HEADING_AGAINST_WIND);
+    }
+	  
   }
 
   plugin.execCommand = function (input) {
     app.debug(input);
 
-    if (!commands[input]) {
+    if (!COMMANDS[input]) {
       console.error('Invalid input detected');
       return;
     }
 
-    app.debug(commands[input].path);
-    app.debug(commands[input].value);
+    app.debug(COMMANDS[input].path);
+    app.debug(COMMANDS[input].value);
 
-    app.putSelfPath(commands[input].path, commands[input].value);
+    app.putSelfPath(COMMANDS[input].path, COMMANDS[input].value);
   }
 
   plugin.readInputs = function () {
@@ -206,8 +235,10 @@ module.exports = function (app) {
     return input;
   }
 
-  //plugin.beep([1000, 2000, 1000]);
-  plugin.beep = function (pattern) {
+  plugin.beep = function (inputPattern) {
+    //copy array since it gets passed by reference
+    pattern = inputPattern.slice();
+
     clearTimeout(beepTimeout);
     buzzerState ^= 1;
 
